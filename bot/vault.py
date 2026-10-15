@@ -23,8 +23,12 @@ FIELDS = {
     "page_id", "page_name", "page_token", "ig_id", "ig_username",
     # whatsapp cloud api
     "whatsapp_phone_id", "whatsapp_token", "waba_id", "whatsapp_display", "whatsapp_name",
+    "whatsapp_pin", "whatsapp_coexistence",
+    # option B: connected through Maya's router (Tech Provider app)
+    "router_url", "router_relay_key", "connected_via",
 }
-SECRET_FIELDS = {"telegram_token", "telegram_secret", "meta_app_secret", "page_token", "whatsapp_token", "owner_pairing_code"}
+SECRET_FIELDS = {"telegram_token", "telegram_secret", "meta_app_secret", "page_token", "whatsapp_token", "owner_pairing_code",
+                 "whatsapp_pin", "router_relay_key"}
 
 
 def _fernet(secret_key: str) -> Fernet:

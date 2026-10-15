@@ -98,6 +98,39 @@ width:100%;text-align:right;cursor:pointer}}button:hover{{border-color:#999}}.mu
 </head><body><main><h1>{html.escape(title)}</h1>{body}</main></body></html>"""
 
 
+ROUTER_FIELDS = {"whatsapp_phone_id", "waba_id", "whatsapp_token", "whatsapp_display", "whatsapp_name", "whatsapp_pin",
+                 "whatsapp_coexistence", "page_id", "page_name", "page_token", "ig_id", "ig_username"}
+
+
+def router_signature_ok(relay_key: str, headers, raw: bytes, max_age: int = 300) -> bool:
+    """Everything from the router is signed: HMAC-SHA256(relay_key, "<timestamp>.<body>"), timestamp within 5 minutes."""
+    import hashlib
+    import hmac as _hmac
+    ts = headers.get("X-Router-Timestamp", "")
+    sig = headers.get("X-Router-Signature", "")
+    if not relay_key or not ts.isdigit() or not sig or abs(time.time() - int(ts)) > max_age:
+        return False
+    expected = _hmac.new(relay_key.encode(), f"{ts}.".encode() + raw, hashlib.sha256).hexdigest()
+    return secrets.compare_digest(sig, expected)
+
+
+def unroute(cfg, **ids):
+    """Option B: tell Maya's router to forget this channel (signed with the relay key). Best effort."""
+    import hashlib
+    import hmac as _hmac
+    import json as _json
+    if cfg.connected_via != "router" or not (cfg.router_url and cfg.router_relay_key):
+        return
+    body = _json.dumps({k: v for k, v in ids.items() if v}).encode()
+    ts = str(int(time.time()))
+    sig = _hmac.new(cfg.router_relay_key.encode(), f"{ts}.".encode() + body, hashlib.sha256).hexdigest()
+    try:
+        requests.post(f"{cfg.router_url}/api/unroute", data=body, timeout=TIMEOUT,
+                      headers={"Content-Type": "application/json", "X-Router-Timestamp": ts, "X-Router-Signature": sig})
+    except requests.RequestException as e:
+        log.warning("unroute failed: %s", type(e).__name__)
+
+
 def create_blueprint(cfg, vault, reload_credentials, require_admin):
     bp = Blueprint("connect", __name__)
     pending: dict[str, dict] = {}  # one-time values for the Facebook popup (single worker, see render.yaml)
@@ -157,9 +190,11 @@ def create_blueprint(cfg, vault, reload_credentials, require_admin):
             instagram={"connected": ch["instagram"] and bool(cfg.ig_id or cfg.sources.get("page_token") == "env"),
                        "account": f"@{cfg.ig_username}" if cfg.ig_username else ""},
             whatsapp={"connected": ch["whatsapp"], "account": " ".join(x for x in (cfg.whatsapp_name, cfg.whatsapp_display) if x),
+                      "coexistence": cfg.whatsapp_coexistence,
                       "source": cfg.sources.get("whatsapp_token", ""),
                       "health": check(lambda: _graph(cfg, "GET", cfg.whatsapp_phone_id, token=cfg.whatsapp_token))
                       if ch["whatsapp"] else None},
+            via=cfg.connected_via or "",
             webhook={"meta": f"{cfg.public_url}/webhook/meta" if cfg.public_url else "",
                      "verifyToken": cfg.meta_verify_token,
                      "oauthRedirect": f"{cfg.public_url}/connect/meta/callback" if cfg.public_url else ""},
@@ -248,6 +283,7 @@ def create_blueprint(cfg, vault, reload_credentials, require_admin):
                 _graph(cfg, "DELETE", f"{cfg.page_id}/subscribed_apps", token=cfg.page_token)
             except ConnectError as e:
                 log.warning("unsubscribe page: %s", e)
+        unroute(cfg, page_id=cfg.page_id, ig_id=cfg.ig_id)
         vault.update(page_id=None, page_name=None, page_token=None, ig_id=None, ig_username=None)
         reload_credentials()
         return jsonify(ok=True, stillFromEnv=bool(cfg.page_token))
@@ -358,9 +394,50 @@ def create_blueprint(cfg, vault, reload_credentials, require_admin):
     @bp.delete("/admin/channels/whatsapp")
     def whatsapp_disconnect():
         require_admin()
-        vault.update(whatsapp_phone_id=None, waba_id=None, whatsapp_token=None, whatsapp_display=None, whatsapp_name=None)
+        unroute(cfg, waba_id=cfg.waba_id)
+        vault.update(whatsapp_phone_id=None, waba_id=None, whatsapp_token=None, whatsapp_display=None, whatsapp_name=None,
+                     whatsapp_pin=None, whatsapp_coexistence=None)
         reload_credentials()
         return jsonify(ok=True, stillFromEnv=bool(cfg.whatsapp_token))
+
+    # ---------------- option B: Maya's router (Tech Provider app, Embedded Signup v4) ----------------
+
+    @bp.post("/admin/channels/router/start")
+    def router_start():
+        """Ask the router for a one-time connect link. The router URL comes from the hub package (hub.config.json)."""
+        require_admin()
+        router = str((request.get_json(silent=True) or {}).get("routerUrl", "")).rstrip("/")
+        if not re.fullmatch(r"https://[a-z0-9.-]+(:\d+)?", router):
+            return fail(ConnectError("BAD_ROUTER_URL"))
+        relay_key = cfg.router_relay_key or secrets.token_urlsafe(32)
+        try:
+            r = requests.post(f"{router}/api/sessions", json={"serverUrl": base_url(), "relayKey": relay_key}, timeout=TIMEOUT)
+            data = r.json()
+        except (requests.RequestException, ValueError) as e:
+            return fail(ConnectError("ROUTER_UNREACHABLE", type(e).__name__))
+        except ConnectError as e:
+            return fail(e)
+        if not data.get("ok"):
+            return fail(ConnectError("ROUTER_ERROR", str(data.get("error", ""))))
+        vault.update(router_url=router, router_relay_key=relay_key)
+        reload_credentials()
+        return jsonify(ok=True, url=data["connectUrl"], expiresIn=data.get("expiresIn"))
+
+    @bp.post("/router/credentials")
+    def router_credentials():
+        """The router pushes the tokens of this business only, signed with this server's relay key."""
+        raw = request.get_data()
+        if not router_signature_ok(cfg.router_relay_key, request.headers, raw):
+            return jsonify(ok=False, error="BAD_SIGNATURE"), 403
+        payload = request.get_json(silent=True) or {}
+        creds = {k: v for k, v in (payload.get("credentials") or {}).items() if k in ROUTER_FIELDS and v is not None}
+        if not creds:
+            return jsonify(ok=False, error="EMPTY"), 400
+        creds["whatsapp_coexistence"] = str(bool(creds.get("whatsapp_coexistence")))
+        vault.update(connected_via="router", **{k: str(v) for k, v in creds.items()})
+        reload_credentials()
+        log.info("router connected: %s", ", ".join(payload.get("connected") or []))
+        return jsonify(ok=True)
 
     return bp
 

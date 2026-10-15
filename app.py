@@ -19,7 +19,7 @@ from flask import Flask, abort, jsonify, request
 from bot import channels
 from bot.brain import Brain
 from bot.config import Config
-from bot.connect import create_blueprint, handle_owner_pairing
+from bot.connect import create_blueprint, handle_owner_pairing, router_signature_ok
 from bot.knowledge import KnowledgeError, validate
 from bot.store import OUTCOME_RULE, Store, iso, now
 from bot.vault import Vault
@@ -97,6 +97,16 @@ def create_app(config: Config | None = None, store: Store | None = None, smart=N
             return "Server misconfigured", 500
         body = request.get_data()
         if not channels.meta_signature_ok(cfg.meta_app_secret, body, request.headers.get("X-Hub-Signature-256", "")):
+            return "Invalid signature", 403
+        for inc in channels.parse_meta(request.get_json(silent=True) or {}):
+            pool.submit(process, inc)
+        return jsonify(status="ok")
+
+    @app.post("/webhook/router")
+    def router_webhook():
+        """Option B: Meta → Maya's router (verifies Meta's signature) → here, signed with this server's relay key."""
+        raw = request.get_data()
+        if not router_signature_ok(cfg.router_relay_key, request.headers, raw):
             return "Invalid signature", 403
         for inc in channels.parse_meta(request.get_json(silent=True) or {}):
             pool.submit(process, inc)

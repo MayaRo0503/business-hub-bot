@@ -48,6 +48,8 @@ class Config:
         # display-only details filled by dashboard connections
         self.telegram_username = self.page_name = self.ig_id = self.ig_username = ""
         self.whatsapp_display = self.whatsapp_name = ""
+        self.router_url = self.router_relay_key = self.connected_via = ""
+        self.whatsapp_coexistence = False
 
         self._env_creds = {attr: _env(var) for attr, var in CREDENTIALS.items()}
         self.sources: dict[str, str] = {}
@@ -59,11 +61,15 @@ class Config:
             value = stored.get(attr) or self._env_creds[attr]
             setattr(self, attr, value)
             self.sources[attr] = "dashboard" if stored.get(attr) else ("env" if value else "")
-        for attr in ("telegram_username", "page_name", "ig_id", "ig_username", "whatsapp_display", "whatsapp_name"):
+        for attr in ("telegram_username", "page_name", "ig_id", "ig_username", "whatsapp_display", "whatsapp_name",
+                     "router_url", "router_relay_key", "connected_via"):
             setattr(self, attr, stored.get(attr, ""))
+        self.whatsapp_coexistence = stored.get("whatsapp_coexistence") == "True"
 
     def channels(self) -> dict:
-        meta = bool(self.meta_app_secret and self.meta_verify_token)
+        # option A: the business's own app verifies Meta's signature here.
+        # option B: Maya's router verifies it and relays, signed with router_relay_key.
+        meta = bool(self.meta_app_secret and self.meta_verify_token) or bool(self.router_relay_key)
         return {
             "whatsapp": meta and bool(self.whatsapp_phone_id and self.whatsapp_token),
             "messenger": meta and bool(self.page_token),
