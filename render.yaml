@@ -1,5 +1,5 @@
 # Render Blueprint – one bot server per business.
-# Deploy: https://render.com/deploy?repo=<URL of the public bot-server repo>
+# Deploy: https://render.com/deploy?repo=https://github.com/MayaRo0503/business-hub-bot
 # Secrets (sync: false) are entered in the Render form during the implementation meeting.
 services:
   - type: web
