@@ -53,10 +53,13 @@ def tg(monkeypatch):
     return state
 
 
-def added_to_channel(can_post=True, status="administrator", update_id=50):
+OWNER = 999  # OWNER_TELEGRAM_CHAT_ID in conftest
+
+
+def added_to_channel(can_post=True, status="administrator", update_id=50, by=OWNER, chat_id=CHANNEL, title="מספרת שירן – עדכונים"):
     return {"update_id": update_id, "my_chat_member": {
-        "chat": {"id": CHANNEL, "type": "channel", "title": "מספרת שירן – עדכונים", "username": "shiran_news"},
-        "from": {"id": 1, "first_name": "שירן"},
+        "chat": {"id": chat_id, "type": "channel", "title": title, "username": "shiran_news"},
+        "from": {"id": by, "first_name": "שירן", "username": "shiran"},
         "new_chat_member": {"status": status, "can_post_messages": can_post, "user": {"id": 777, "is_bot": True}}}}
 
 
@@ -97,6 +100,46 @@ def test_pick_channel_after_adding_the_bot(make_app, tg, monkeypatch):
     # removed from the channel later → shown as disconnected instead of failing at publish time
     client.post("/webhook/telegram", json=added_to_channel(status="left", update_id=52), headers=TG)
     assert not client.get("/admin/channels", headers=ADMIN).json["telegram"]["channel"]["connected"]
+
+
+def test_strangers_cannot_put_their_channel_in_the_owners_list(make_app, tg, monkeypatch):
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://shiran-bot.onrender.com")
+    _, client, store = make_app()
+    cands = lambda: client.get("/admin/channels", headers=ADMIN).json["telegram"]["channel"]["candidates"]
+
+    # before the owner pressed "add the bot to a channel": ignored, even from the owner
+    client.post("/webhook/telegram", json=added_to_channel(), headers=TG)
+    assert cands() == []
+
+    client.post("/admin/channels/telegram/channel/prepare", headers=ADMIN)
+    # a stranger adds the (public) bot to their own channel during the window: ignored, the owner is paired
+    for i in range(6):
+        client.post("/webhook/telegram", json=added_to_channel(update_id=60 + i, by=123, chat_id=-1009000000000 - i,
+                                                               title=f"ערוץ זר {i}"), headers=TG)
+    assert cands() == []
+    # the owner's own add counts, and shows who added it
+    client.post("/webhook/telegram", json=added_to_channel(update_id=70), headers=TG)
+    assert [c["title"] for c in cands()] == ["מספרת שירן – עדכונים"] and cands()[0]["by"] == "שירן @shiran"
+
+    # the window closes after 15 minutes
+    import bot.publish as publish
+    real = publish.time.time
+    monkeypatch.setattr(publish.time, "time", lambda: real() + 16 * 60)
+    client.post("/webhook/telegram", json=added_to_channel(update_id=71, chat_id=-1007777777777, title="מאוחר"), headers=TG)
+    assert "מאוחר" not in [c["title"] for c in cands()]
+
+
+def test_no_paired_owner_still_needs_the_window_and_list_never_overflows(make_app, tg, monkeypatch):
+    monkeypatch.delenv("OWNER_TELEGRAM_CHAT_ID", raising=False)
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://shiran-bot.onrender.com")
+    _, client, _ = make_app()
+    client.post("/admin/channels/telegram/channel/prepare", headers=ADMIN)
+    for i in range(7):
+        client.post("/webhook/telegram", json=added_to_channel(update_id=80 + i, by=500 + i, chat_id=-1008000000000 - i,
+                                                               title=f"ערוץ {i}"), headers=TG)
+    titles = [c["title"] for c in client.get("/admin/channels", headers=ADMIN).json["telegram"]["channel"]["candidates"]]
+    # the first five stay; later adds cannot push them out
+    assert len(titles) == 5 and "ערוץ 0" in titles and "ערוץ 6" not in titles
 
 
 def test_connect_by_username_and_rights(make_app, tg):

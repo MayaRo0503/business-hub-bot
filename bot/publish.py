@@ -7,8 +7,10 @@ Telegram channel (the business's own bot posts as the channel):
   DELETE /admin/channels/telegram/channel
   POST   /admin/publish/telegram                   multipart: text, file? (photo ≤ 10 MB, video ≤ 50 MB)
 
-Channels the bot is added to are only remembered as candidates. Nothing is published anywhere until the owner picks the
-channel in the dashboard (admin token), so adding this bot to someone else's channel achieves nothing.
+Channels the bot is added to are only remembered as candidates, and only when (a) the owner pressed "add the bot to a
+channel" in the dashboard in the last 15 minutes and (b) if the owner's Telegram is paired for alerts, the owner is the
+one who added it. The bot is public, so anyone can add it to their own channel; without these checks a stranger's channel
+could show up in the owner's list. Nothing is published until the owner picks the channel in the dashboard (admin token).
 Bot API: https://core.telegram.org/bots/api (sendMessage 4096 chars, captions 1024, uploads: photo 10 MB, other 50 MB).
 """
 import json
@@ -28,6 +30,8 @@ TEXT_LIMIT, CAPTION_LIMIT = 4096, 1024
 PHOTO_MAX, VIDEO_MAX = 10 * 1024 * 1024, 50 * 1024 * 1024
 UPLOAD_TIMEOUT = 180
 CANDIDATE_TTL = 7 * 24 * 3600
+ADD_WINDOW = 15 * 60  # candidates are accepted only this long after the owner's "prepare"
+MAX_CANDIDATES = 5
 PHOTO_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_EXT = {".mp4"}
 
@@ -71,15 +75,26 @@ def note_channel(cfg, vault, reload_credentials, update: dict) -> bool:
     member = mcm.get("new_chat_member") or {}
     can_post = member.get("status") == "administrator" and member.get("can_post_messages", False)
     stored = vault.load()
-    cands = [c for c in _candidates(stored) if str(c["id"]) != str(chat.get("id"))]
+    cands = _candidates(stored)
+    known = [c for c in cands if str(c["id"]) != str(chat.get("id"))]
     changes = {}
     if can_post:
-        cands.insert(0, {"id": str(chat["id"]), "title": str(chat.get("title", ""))[:120],
-                         "username": str(chat.get("username", "")), "at": int(time.time())})
+        by = mcm.get("from") or {}
+        window_open = time.time() - float(stored.get("telegram_channel_window") or 0) < ADD_WINDOW
+        owner = str(cfg.owner_telegram_chat_id or "")
+        by_owner = not owner or str(by.get("id", "")) == owner  # a private chat id is the user's id
+        if not (window_open and by_owner) or len(known) >= MAX_CANDIDATES:
+            log.info("ignored: bot added to a channel outside the owner's connect step")
+            return True  # never let unrequested adds push out the owner's channel
+        known.insert(0, {"id": str(chat["id"]), "title": str(chat.get("title", ""))[:120],
+                         "username": str(chat.get("username", "")), "at": int(time.time()),
+                         "by": " ".join(x for x in (by.get("first_name", ""), f"@{by['username']}" if by.get("username") else "") if x)[:80]})
     elif str(stored.get("telegram_channel_id")) == str(chat.get("id")):
         # the bot lost its rights in the connected channel: show it as disconnected rather than failing later
         changes.update(telegram_channel_id=None, telegram_channel_title=None, telegram_channel_username=None)
-    changes["telegram_channel_candidates"] = json.dumps(cands[:5], ensure_ascii=False) if cands else None
+    elif len(known) == len(cands):
+        return True  # not a channel we know about
+    changes["telegram_channel_candidates"] = json.dumps(known, ensure_ascii=False) if known else None
     vault.update(**changes)
     reload_credentials()
     return True
@@ -91,7 +106,7 @@ def telegram_status(cfg, stored: dict) -> dict:
         "connected": connected,
         "title": stored.get("telegram_channel_title", "") if connected else "",
         "username": stored.get("telegram_channel_username", "") if connected else "",
-        "candidates": [{"id": c["id"], "title": c["title"], "username": c.get("username", "")}
+        "candidates": [{"id": c["id"], "title": c["title"], "username": c.get("username", ""), "by": c.get("by", "")}
                        for c in _candidates(stored)] if cfg.telegram_token else [],
     }
 
@@ -144,6 +159,8 @@ def create_publish_blueprint(cfg, vault, reload_credentials, require_admin):
             username = bot_username()
         except ConnectError as e:
             return fail(e)
+        vault.update(telegram_channel_window=str(int(time.time())))  # opens the 15-minute window for "added to a channel"
+        reload_credentials()
         # deep link: Telegram asks which channel, with "post messages" already ticked
         return jsonify(ok=True, addLink=f"https://t.me/{username}?startchannel&admin=post_messages+edit_messages",
                        bot=f"@{username}")
@@ -172,11 +189,9 @@ def create_publish_blueprint(cfg, vault, reload_credentials, require_admin):
             if e.code == "TELEGRAM_ERROR" and "not found" in e.detail.lower():
                 e = ConnectError("CHANNEL_NOT_FOUND", e.detail)
             return fail(e)
-        stored = vault.load()
-        cands = [c for c in _candidates(stored) if str(c["id"]) != str(chat["id"])]
         vault.update(telegram_channel_id=str(chat["id"]), telegram_channel_title=str(chat.get("title", ""))[:120],
-                     telegram_channel_username=str(chat.get("username", "")),
-                     telegram_channel_candidates=json.dumps(cands, ensure_ascii=False) if cands else None)
+                     telegram_channel_username=str(chat.get("username", "")), telegram_channel_window=None,
+                     telegram_channel_candidates=None)  # done: forget the other candidates and close the window
         reload_credentials()
         return jsonify(ok=True, account=chat.get("title", ""))
 

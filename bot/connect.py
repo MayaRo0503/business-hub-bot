@@ -257,7 +257,8 @@ def create_blueprint(cfg, vault, reload_credentials, require_admin):
                 log.warning("deleteWebhook: %s", e)  # disconnect locally anyway
         vault.update(telegram_token=None, telegram_secret=None, telegram_username=None,
                      owner_telegram_chat_id=None, owner_pairing_code=None, telegram_channel_id=None,
-                     telegram_channel_title=None, telegram_channel_username=None, telegram_channel_candidates=None)
+                     telegram_channel_title=None, telegram_channel_username=None, telegram_channel_candidates=None,
+                     telegram_channel_window=None)
         reload_credentials()
         return jsonify(ok=True, stillFromEnv=bool(cfg.telegram_token))
 
