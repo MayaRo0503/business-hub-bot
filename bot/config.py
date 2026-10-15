@@ -1,4 +1,9 @@
-"""All settings come from environment variables (set in Render, or in .env for local runs)."""
+"""Settings: environment variables (Render / .env) plus channels connected from the dashboard.
+
+Channel credentials can come from two places. A value connected from the dashboard (stored
+encrypted, see vault.py) wins over the environment variable, so a business can connect or
+replace a channel without touching Render. Everything else is environment-only.
+"""
 import os
 
 
@@ -6,31 +11,56 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+# attribute → environment variable, for every credential the dashboard can also set
+CREDENTIALS = {
+    "meta_app_id": "META_APP_ID",
+    "meta_app_secret": "META_APP_SECRET",
+    "whatsapp_phone_id": "WHATSAPP_PHONE_ID",
+    "whatsapp_token": "FACEBOOK_ACCESS_TOKEN",  # name used by hebrew-chatbot-builder
+    "waba_id": "WHATSAPP_BUSINESS_ACCOUNT_ID",
+    "page_token": "PAGE_ACCESS_TOKEN",          # Messenger + Instagram (via the Facebook Page)
+    "page_id": "PAGE_ID",
+    "telegram_token": "TELEGRAM_BOT_TOKEN",
+    "telegram_secret": "TELEGRAM_WEBHOOK_SECRET",
+    "owner_telegram_chat_id": "OWNER_TELEGRAM_CHAT_ID",
+}
+
+
 class Config:
     def __init__(self):
         self.admin_token = _env("ADMIN_TOKEN")
+        self.secret_key = _env("SECRET_KEY") or self.admin_token
         self.database_url = _env("DATABASE_URL", "sqlite:///bot.db")
         self.mode = _env("BOT_MODE", "basic")  # basic | smart
         self.business_name = _env("BUSINESS_NAME")
         self.session_timeout_min = int(_env("SESSION_TIMEOUT_MIN", "30"))  # israeli-chatbot-analytics default
         self.handoff_silence_hours = float(_env("HANDOFF_SILENCE_HOURS", "12"))
         self.pii_salt = _env("PII_SALT") or self.admin_token
+        self.public_url = (_env("PUBLIC_URL") or _env("RENDER_EXTERNAL_URL")).rstrip("/")
 
-        # Meta: one app serves WhatsApp, Messenger and Instagram
-        self.meta_app_secret = _env("META_APP_SECRET")
         self.meta_verify_token = _env("META_VERIFY_TOKEN")
         self.graph_version = _env("GRAPH_API_VERSION", "v25.0")
-        self.whatsapp_phone_id = _env("WHATSAPP_PHONE_ID")
-        self.whatsapp_token = _env("FACEBOOK_ACCESS_TOKEN")  # name used by hebrew-chatbot-builder
-        self.page_token = _env("PAGE_ACCESS_TOKEN")          # Messenger + Instagram (via the Facebook Page)
-
-        self.telegram_token = _env("TELEGRAM_BOT_TOKEN")
-        self.telegram_secret = _env("TELEGRAM_WEBHOOK_SECRET")
-        self.owner_telegram_chat_id = _env("OWNER_TELEGRAM_CHAT_ID")
 
         # Smart mode
         self.anthropic_key = _env("ANTHROPIC_API_KEY")
         self.claude_model = _env("CLAUDE_MODEL", "claude-haiku-5-5")
+
+        # display-only details filled by dashboard connections
+        self.telegram_username = self.page_name = self.ig_id = self.ig_username = ""
+        self.whatsapp_display = self.whatsapp_name = ""
+
+        self._env_creds = {attr: _env(var) for attr, var in CREDENTIALS.items()}
+        self.sources: dict[str, str] = {}
+        self.apply({})
+
+    def apply(self, stored: dict):
+        """Overlay credentials connected from the dashboard on top of the environment."""
+        for attr in CREDENTIALS:
+            value = stored.get(attr) or self._env_creds[attr]
+            setattr(self, attr, value)
+            self.sources[attr] = "dashboard" if stored.get(attr) else ("env" if value else "")
+        for attr in ("telegram_username", "page_name", "ig_id", "ig_username", "whatsapp_display", "whatsapp_name"):
+            setattr(self, attr, stored.get(attr, ""))
 
     def channels(self) -> dict:
         meta = bool(self.meta_app_secret and self.meta_verify_token)

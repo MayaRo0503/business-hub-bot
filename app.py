@@ -19,8 +19,10 @@ from flask import Flask, abort, jsonify, request
 from bot import channels
 from bot.brain import Brain
 from bot.config import Config
+from bot.connect import create_blueprint, handle_owner_pairing
 from bot.knowledge import KnowledgeError, validate
 from bot.store import OUTCOME_RULE, Store, iso, now
+from bot.vault import Vault
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 log = logging.getLogger("bot")
@@ -37,6 +39,20 @@ def create_app(config: Config | None = None, store: Store | None = None, smart=N
     brain = Brain(db, cfg, smart)
     pool = executor or ThreadPoolExecutor(max_workers=8)
 
+    # channels connected from the dashboard: encrypted in the DB, overlaid on the environment
+    vault = Vault(db, cfg.secret_key or "local-dev-only")
+    loaded = {"version": -1}
+
+    def reload_credentials():
+        loaded["version"] = vault.version()
+        cfg.apply(vault.load())
+
+    def refresh_credentials():
+        if vault.version() != loaded["version"]:
+            reload_credentials()
+
+    reload_credentials()
+
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 1 * 1024 * 1024
 
@@ -44,6 +60,11 @@ def create_app(config: Config | None = None, store: Store | None = None, smart=N
         try:
             if not db.first_time(inc.msg_id):
                 return  # a retry of a message we already handled
+            if inc.channel == "telegram" and inc.text.startswith("/start "):
+                paired = handle_owner_pairing(cfg, vault, reload_credentials, inc.user_id, inc.text)
+                if paired:
+                    channels.send_telegram(cfg, inc.user_id, paired, [])
+                    return
             if inc.channel == "telegram" and inc.text.strip() == "/myid":
                 channels.send_telegram(cfg, inc.user_id, f"מזהה הצ'אט שלך: {inc.user_id}", [])
                 return
@@ -64,6 +85,10 @@ def create_app(config: Config | None = None, store: Store | None = None, smart=N
                 and hmac.compare_digest(request.args.get("hub.verify_token", ""), cfg.meta_verify_token)):
             return request.args.get("hub.challenge", ""), 200
         return "Forbidden", 403
+
+    @app.before_request
+    def _fresh_credentials():
+        refresh_credentials()
 
     @app.post("/webhook/meta")
     def meta_webhook():
@@ -173,6 +198,7 @@ def create_app(config: Config | None = None, store: Store | None = None, smart=N
         require_admin()
         return jsonify(handoffs=db.handoffs(since_param(default_days=7)))
 
+    app.register_blueprint(create_blueprint(cfg, vault, reload_credentials, require_admin))
     return app
 
 
