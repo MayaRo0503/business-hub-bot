@@ -93,7 +93,7 @@ def test_telegram_connect_end_to_end(make_app, api, https, sent, monkeypatch):
     set_hook = next(c for c in api["calls"] if c[1].endswith("/setWebhook"))
     secret = set_hook[2]["secret_token"]
     assert set_hook[2]["url"] == "https://shiran-bot.onrender.com/webhook/telegram"
-    assert set_hook[2]["allowed_updates"] == ["message", "callback_query"]
+    assert set_hook[2]["allowed_updates"] == ["message", "callback_query", "my_chat_member"]
     assert 1 <= len(secret) <= 256 and all(ch.isalnum() or ch in "_-" for ch in secret)
 
     status = client.get("/admin/channels", headers=ADMIN).json["telegram"]

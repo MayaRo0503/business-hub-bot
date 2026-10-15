@@ -2,6 +2,7 @@
 
 Webhooks:  GET/POST /webhook/meta      WhatsApp + Messenger + Instagram
            POST     /webhook/telegram
+Publish:   /admin/publish/*  (content library → the business's channels, see bot/publish.py)
 Admin:     /admin/*  (Authorization: Bearer ADMIN_TOKEN) – used by scripts/bot.mjs in the hub folder
 Health:    GET /health
 
@@ -20,6 +21,7 @@ from bot import channels
 from bot.brain import Brain
 from bot.config import Config
 from bot.connect import create_blueprint, handle_owner_pairing, router_signature_ok
+from bot.publish import create_publish_blueprint, note_channel
 from bot.knowledge import KnowledgeError, validate
 from bot.store import OUTCOME_RULE, Store, iso, now
 from bot.vault import Vault
@@ -118,6 +120,8 @@ def create_app(config: Config | None = None, store: Store | None = None, smart=N
         if not cfg.telegram_secret or not hmac.compare_digest(secret, cfg.telegram_secret):
             return "Forbidden", 403
         update = request.get_json(silent=True) or {}
+        if note_channel(cfg, vault, reload_credentials, update):
+            return jsonify(ok=True)  # added to / removed from a channel: nothing to answer
         channels.answer_callback(cfg, update)
         for inc in channels.parse_telegram(update):
             pool.submit(process, inc)
@@ -209,6 +213,7 @@ def create_app(config: Config | None = None, store: Store | None = None, smart=N
         return jsonify(handoffs=db.handoffs(since_param(default_days=7)))
 
     app.register_blueprint(create_blueprint(cfg, vault, reload_credentials, require_admin))
+    app.register_blueprint(create_publish_blueprint(cfg, vault, reload_credentials, require_admin))
     return app
 
 

@@ -34,6 +34,7 @@ from urllib.parse import urlencode
 import requests
 from flask import Blueprint, jsonify, request
 
+from .channels import TELEGRAM_UPDATES
 from .vault import mask
 
 log = logging.getLogger("bot.connect")
@@ -178,6 +179,7 @@ def create_blueprint(cfg, vault, reload_credentials, require_admin):
 
     @bp.get("/admin/channels")
     def status():
+        from . import publish as _publish  # publish imports this module, so import it lazily
         require_admin()
         verify = request.args.get("verify") == "1"
         ch = cfg.channels()
@@ -194,7 +196,8 @@ def create_blueprint(cfg, vault, reload_credentials, require_admin):
         return jsonify(
             telegram={"connected": ch["telegram"], "account": f"@{cfg.telegram_username}" if cfg.telegram_username else "",
                       "source": cfg.sources.get("telegram_token", ""), "ownerAlerts": bool(cfg.owner_telegram_chat_id),
-                      "health": check(lambda: _telegram(cfg.telegram_token, "getMe")) if ch["telegram"] else None},
+                      "health": check(lambda: _telegram(cfg.telegram_token, "getMe")) if ch["telegram"] else None,
+                      "channel": _publish.telegram_status(cfg, vault.load())},
             metaApp={"configured": bool(cfg.meta_app_id and cfg.meta_app_secret), "appId": cfg.meta_app_id,
                      "secret": mask(cfg.meta_app_secret), "source": cfg.sources.get("meta_app_secret", "")},
             messenger={"connected": ch["messenger"], "account": cfg.page_name, "source": cfg.sources.get("page_token", ""),
@@ -224,7 +227,7 @@ def create_blueprint(cfg, vault, reload_credentials, require_admin):
             me = _telegram(token, "getMe")
             secret = secrets.token_urlsafe(32)  # A-Z a-z 0-9 _ - only, as Telegram requires
             _telegram(token, "setWebhook", {"url": f"{base_url()}/webhook/telegram", "secret_token": secret,
-                                            "allowed_updates": ["message", "callback_query"], "drop_pending_updates": True})
+                                            "allowed_updates": TELEGRAM_UPDATES, "drop_pending_updates": True})
         except ConnectError as e:
             return fail(e)
         code = secrets.token_urlsafe(12).replace("-", "a").replace("_", "b")
@@ -253,7 +256,8 @@ def create_blueprint(cfg, vault, reload_credentials, require_admin):
             except ConnectError as e:
                 log.warning("deleteWebhook: %s", e)  # disconnect locally anyway
         vault.update(telegram_token=None, telegram_secret=None, telegram_username=None,
-                     owner_telegram_chat_id=None, owner_pairing_code=None)
+                     owner_telegram_chat_id=None, owner_pairing_code=None, telegram_channel_id=None,
+                     telegram_channel_title=None, telegram_channel_username=None, telegram_channel_candidates=None)
         reload_credentials()
         return jsonify(ok=True, stillFromEnv=bool(cfg.telegram_token))
 

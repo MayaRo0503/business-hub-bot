@@ -17,6 +17,8 @@ log = logging.getLogger("bot.vault")
 FIELDS = {
     # telegram
     "telegram_token", "telegram_secret", "telegram_username", "owner_telegram_chat_id", "owner_pairing_code",
+    # telegram channel the business publishes to (content library → "פרסום")
+    "telegram_channel_id", "telegram_channel_title", "telegram_channel_username", "telegram_channel_candidates",
     # meta app (option A: the business owns the app)
     "meta_app_id", "meta_app_secret",
     # facebook page + instagram (through the page)

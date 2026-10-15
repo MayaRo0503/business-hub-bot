@@ -272,4 +272,4 @@ def test_telegram_setup_uses_public_https_url(make_app, sent, monkeypatch):
     r = client.post("/admin/telegram/setup", headers=ADMIN)
     assert r.status_code == 200
     assert sent[-1]["body"] == {"url": "https://shiran-bot.onrender.com/webhook/telegram", "secret_token": "tg-secret",
-                                "allowed_updates": ["message", "callback_query"]}
+                                "allowed_updates": ["message", "callback_query", "my_chat_member"]}

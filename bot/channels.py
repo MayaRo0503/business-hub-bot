@@ -149,9 +149,13 @@ def send_telegram(cfg, chat_id: str, text: str, options: list):
     return _post(url, body, what="telegram")
 
 
+# my_chat_member: the bot was added to a channel, so the owner can pick it for publishing (bot/publish.py)
+TELEGRAM_UPDATES = ["message", "callback_query", "my_chat_member"]
+
+
 def telegram_set_webhook(cfg, url: str) -> bool:
     return _post(f"https://api.telegram.org/bot{cfg.telegram_token}/setWebhook",
-                 {"url": url, "secret_token": cfg.telegram_secret, "allowed_updates": ["message", "callback_query"]},
+                 {"url": url, "secret_token": cfg.telegram_secret, "allowed_updates": TELEGRAM_UPDATES},
                  what="telegram-setWebhook")
 
 
