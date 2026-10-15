@@ -25,6 +25,7 @@ Facts from the official docs this follows:
 """
 import html
 import logging
+import os
 import re
 import secrets
 import time
@@ -114,6 +115,16 @@ def router_signature_ok(relay_key: str, headers, raw: bytes, max_age: int = 300)
     return secrets.compare_digest(sig, expected)
 
 
+def router_url_ok(url: str) -> bool:
+    """https + a public DNS name. No IP literals, localhost or internal names (the router is a public service)."""
+    m = re.fullmatch(r"https://([a-z0-9-]+(?:\.[a-z0-9-]+)+)", url)
+    if not m:
+        return False
+    host = m.group(1)
+    tld = host.rsplit(".", 1)[-1]
+    return not (tld.isdigit() or host.endswith((".local", ".internal", ".localhost")) or host == "localhost")
+
+
 def unroute(cfg, **ids):
     """Option B: tell Maya's router to forget this channel (signed with the relay key). Best effort."""
     import hashlib
@@ -134,6 +145,7 @@ def unroute(cfg, **ids):
 def create_blueprint(cfg, vault, reload_credentials, require_admin):
     bp = Blueprint("connect", __name__)
     pending: dict[str, dict] = {}  # one-time values for the Facebook popup (single worker, see render.yaml)
+    router_window = {"until": 0.0}  # tokens from the router are accepted only while a connect session started here is open
 
     def base_url() -> str:
         url = cfg.public_url or request.host_url.rstrip("/")
@@ -285,6 +297,7 @@ def create_blueprint(cfg, vault, reload_credentials, require_admin):
                 log.warning("unsubscribe page: %s", e)
         unroute(cfg, page_id=cfg.page_id, ig_id=cfg.ig_id)
         vault.update(page_id=None, page_name=None, page_token=None, ig_id=None, ig_username=None)
+        forget_router_if_unused()
         reload_credentials()
         return jsonify(ok=True, stillFromEnv=bool(cfg.page_token))
 
@@ -397,31 +410,43 @@ def create_blueprint(cfg, vault, reload_credentials, require_admin):
         unroute(cfg, waba_id=cfg.waba_id)
         vault.update(whatsapp_phone_id=None, waba_id=None, whatsapp_token=None, whatsapp_display=None, whatsapp_name=None,
                      whatsapp_pin=None, whatsapp_coexistence=None)
+        forget_router_if_unused()
         reload_credentials()
         return jsonify(ok=True, stillFromEnv=bool(cfg.whatsapp_token))
 
     # ---------------- option B: Maya's router (Tech Provider app, Embedded Signup v4) ----------------
 
+    def forget_router_if_unused():
+        """Once no channel is connected through the router, drop its trust (relay key) entirely."""
+        stored = vault.load()
+        if stored.get("connected_via") == "router" and not (stored.get("waba_id") or stored.get("page_id")):
+            vault.update(router_url=None, router_relay_key=None, connected_via=None)
+
     @bp.post("/admin/channels/router/start")
     def router_start():
         """Ask the router for a one-time connect link. The router URL comes from the hub package (hub.config.json)."""
         require_admin()
-        router = str((request.get_json(silent=True) or {}).get("routerUrl", "")).rstrip("/")
-        if not re.fullmatch(r"https://[a-z0-9.-]+(:\d+)?", router):
+        router = str((request.get_json(silent=True) or {}).get("routerUrl", "")).rstrip("/").lower()
+        pinned = os.environ.get("ROUTER_URL", "").rstrip("/").lower()
+        if not router_url_ok(router) or (pinned and router != pinned):
             return fail(ConnectError("BAD_ROUTER_URL"))
-        relay_key = cfg.router_relay_key or secrets.token_urlsafe(32)
+        # a different router never gets the key that the previous one holds
+        relay_key = cfg.router_relay_key if cfg.router_relay_key and cfg.router_url == router else secrets.token_urlsafe(32)
         try:
-            r = requests.post(f"{router}/api/sessions", json={"serverUrl": base_url(), "relayKey": relay_key}, timeout=TIMEOUT)
+            r = requests.post(f"{router}/api/sessions", json={"serverUrl": base_url(), "relayKey": relay_key},
+                              timeout=TIMEOUT, allow_redirects=False)
             data = r.json()
         except (requests.RequestException, ValueError) as e:
             return fail(ConnectError("ROUTER_UNREACHABLE", type(e).__name__))
         except ConnectError as e:
             return fail(e)
         if not data.get("ok"):
-            return fail(ConnectError("ROUTER_ERROR", str(data.get("error", ""))))
+            return fail(ConnectError("ROUTER_ERROR"))
         vault.update(router_url=router, router_relay_key=relay_key)
         reload_credentials()
-        return jsonify(ok=True, url=data["connectUrl"], expiresIn=data.get("expiresIn"))
+        expires = min(int(data.get("expiresIn") or 1800), 1800)
+        router_window["until"] = time.time() + expires + 120
+        return jsonify(ok=True, url=data["connectUrl"], expiresIn=expires)
 
     @bp.post("/router/credentials")
     def router_credentials():
@@ -429,12 +454,15 @@ def create_blueprint(cfg, vault, reload_credentials, require_admin):
         raw = request.get_data()
         if not router_signature_ok(cfg.router_relay_key, request.headers, raw):
             return jsonify(ok=False, error="BAD_SIGNATURE"), 403
+        if time.time() > router_window["until"]:
+            return jsonify(ok=False, error="NO_SESSION"), 409
         payload = request.get_json(silent=True) or {}
         creds = {k: v for k, v in (payload.get("credentials") or {}).items() if k in ROUTER_FIELDS and v is not None}
         if not creds:
             return jsonify(ok=False, error="EMPTY"), 400
         creds["whatsapp_coexistence"] = str(bool(creds.get("whatsapp_coexistence")))
         vault.update(connected_via="router", **{k: str(v) for k, v in creds.items()})
+        router_window["until"] = 0.0
         reload_credentials()
         log.info("router connected: %s", ", ".join(payload.get("connected") or []))
         return jsonify(ok=True)

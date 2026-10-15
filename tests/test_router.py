@@ -27,10 +27,28 @@ def test_shared_vector_with_router():
 
 
 
+def start_session(client, monkeypatch, router="https://maya-hub.vercel.app"):
+    import bot.connect as connect
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://shiran-bot.onrender.com")
+    seen = {}
+
+    class R:
+        def json(self):
+            return {"ok": True, "connectUrl": f"{router}/connect/?s=abc", "expiresIn": 1800}
+
+    def fake_post(url, json=None, timeout=None, **kw):
+        seen.update(url=url, body=json)
+        return R()
+
+    monkeypatch.setattr(connect.requests, "post", fake_post)
+    return client.post("/admin/channels/router/start", json={"routerUrl": router}, headers=ADMIN), seen
+
+
 def test_router_credentials_and_relayed_webhook(make_app, sent, monkeypatch):
     monkeypatch.delenv("META_APP_SECRET", raising=False)
     monkeypatch.delenv("FACEBOOK_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("WHATSAPP_PHONE_ID", raising=False)
+    monkeypatch.setenv("RENDER_EXTERNAL_URL", "https://shiran-bot.onrender.com")
     _, client, store = make_app()
     Vault(store, "admin-secret").update(router_url="https://maya-hub.vercel.app", router_relay_key=RELAY)
 
@@ -42,7 +60,11 @@ def test_router_credentials_and_relayed_webhook(make_app, sent, monkeypatch):
     raw, headers = signed(creds, ts=int(time.time()) - 3600)  # replay of an old push
     assert client.post("/router/credentials", data=raw, headers=headers).status_code == 403
     raw, headers = signed(creds)
+    assert client.post("/router/credentials", data=raw, headers=headers).status_code == 409  # no connect session open
+    start_session(client, monkeypatch)
+    raw, headers = signed(creds)
     assert client.post("/router/credentials", data=raw, headers=headers).json["ok"]
+    assert client.post("/router/credentials", data=raw, headers=headers).status_code == 409  # one push per session
 
     status = client.get("/admin/channels", headers=ADMIN).json
     assert status["whatsapp"]["connected"] and status["whatsapp"]["coexistence"] and status["via"] == "router"
@@ -54,6 +76,13 @@ def test_router_credentials_and_relayed_webhook(make_app, sent, monkeypatch):
     assert client.post("/webhook/router", data=raw, headers=headers).status_code == 200
     assert sent and sent[0]["what"] == "whatsapp" and "חניון" in str(sent[0]["body"])
 
+    # disconnecting the last router channel drops the relay key: old signatures stop working
+    assert client.delete("/admin/channels/whatsapp", headers=ADMIN).json["ok"]
+    stored = Vault(store, "admin-secret").load()
+    assert not stored.get("router_relay_key") and not stored.get("connected_via")
+    raw, headers = signed(wa_text("שוב", msg_id="wamid.r2"))
+    assert client.post("/webhook/router", data=raw, headers=headers).status_code == 403
+
 
 def test_router_start_requests_a_session(make_app, monkeypatch):
     import bot.connect as connect
@@ -64,7 +93,7 @@ def test_router_start_requests_a_session(make_app, monkeypatch):
         def json(self):
             return {"ok": True, "connectUrl": "https://maya-hub.vercel.app/connect/?s=abc", "expiresIn": 1800}
 
-    def fake_post(url, json=None, timeout=None):
+    def fake_post(url, json=None, timeout=None, **kw):
         seen.update(url=url, body=json)
         return R()
 
@@ -79,3 +108,12 @@ def test_router_start_requests_a_session(make_app, monkeypatch):
     first = seen["body"]["relayKey"]
     client.post("/admin/channels/router/start", json={"routerUrl": "https://maya-hub.vercel.app"}, headers=ADMIN)
     assert seen["body"]["relayKey"] == first
+    # ...but a different router gets a fresh key
+    client.post("/admin/channels/router/start", json={"routerUrl": "https://other-hub.vercel.app"}, headers=ADMIN)
+    assert seen["body"]["relayKey"] != first
+    # internal addresses are refused
+    for bad in ["https://127.0.0.1", "https://localhost:8080", "https://169.254.169.254", "https://db.internal", "https://x"]:
+        assert client.post("/admin/channels/router/start", json={"routerUrl": bad}, headers=ADMIN).status_code == 400
+    # when the server pins its router, nothing else is accepted
+    monkeypatch.setenv("ROUTER_URL", "https://maya-hub.vercel.app")
+    assert client.post("/admin/channels/router/start", json={"routerUrl": "https://other-hub.vercel.app"}, headers=ADMIN).status_code == 400
