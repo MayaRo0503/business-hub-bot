@@ -133,7 +133,8 @@ class Store:
         self._exec(
             "INSERT INTO messages (id, session_id, ts, sender, text, intent, confidence, response_ms) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (str(uuid.uuid4()), session_id, iso(now()), sender, text, intent, confidence, response_ms),
+            (str(uuid.uuid4()), session_id, now().isoformat(timespec="microseconds"), sender, text, intent, confidence,
+             response_ms),
         )
 
     def recent_messages(self, session_id: str, limit: int = 8) -> list[dict]:

@@ -32,6 +32,11 @@ class Reply:
     confidence: float | None = None
     handoff: bool = False
 
+    def __post_init__(self):
+        # rule-based replies (welcome, handoff, closing) are deterministic; matched FAQs and fallbacks carry a score
+        if self.confidence is None and self.intent in ("welcome", "handoff", "closing"):
+            self.confidence = 1.0
+
 
 def is_open(hours: dict, at: datetime | None = None) -> bool:
     at = (at or datetime.now(IL)).astimezone(IL)
@@ -98,10 +103,15 @@ class Brain:
                        "new": new_session, "channel": channel}
         else:
             session = self.store.session_for(channel, user_id, self.config.session_timeout_min)
-            self.store.add_message(session["session_id"], "user", hebrew.mask_pii(text or payload))
 
         reply = self._decide(k, session, text.strip(), payload, contact, dry_run)
+        if not dry_run:
+            # the customer's message carries the detected intent (israeli-chatbot-analytics reads it from there)
+            self.store.add_message(session["session_id"], "user", hebrew.mask_pii(text or payload),
+                                   reply.intent if reply else "silent", reply.confidence if reply else None)
         if reply is None:
+            if not dry_run:
+                self.store.update_session(session)
             return None
         if not dry_run:
             ms = int((time.monotonic() - started) * 1000)
@@ -168,7 +178,7 @@ class Brain:
         from .smart import build_system
         voice = self.store.get_kv("voice") or {}
         system = build_system(k, self.business(k), voice.get("register", "informal"), voice.get("gender", "neutral"))
-        history = [] if dry_run else self.store.recent_messages(session["session_id"])[:-1]
+        history = [] if dry_run else self.store.recent_messages(session["session_id"])
         at = datetime.now(IL)
         context = f"[עכשיו בישראל: יום {DAY_HE[(at.weekday() + 1) % 7]} {at.strftime('%H:%M')}. העסק כרגע {'פתוח' if is_open(k['hours'], at) else 'סגור'}]"
         result = self.smart.ask(system, history, text, context)

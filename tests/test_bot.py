@@ -218,6 +218,8 @@ def test_logs_export_schema_and_masking(make_app, sent):
     assert logs["schema"] == "israeli-chatbot-analytics/standard-log"
     assert set(conv) >= {"session_id", "user_id", "channel", "started_at", "ended_at", "messages", "outcome"}
     assert conv["outcome"] == "resolved" and conv["channel"] == "whatsapp"
+    user_msg = next(m for m in conv["messages"] if m["sender"] == "user")
+    assert user_msg["intent"] == "faq:parking"  # intent lives on the customer's message, as the analytics skill expects
     assert "0501234567" not in str(conv) and "972501234567" not in str(conv)  # no raw identifiers in analytics
 
 
