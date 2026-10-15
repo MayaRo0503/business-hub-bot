@@ -1,0 +1,41 @@
+# Render Blueprint – one bot server per business.
+# Deploy: https://render.com/deploy?repo=<URL of the public bot-server repo>
+# Secrets (sync: false) are entered in the Render form during the implementation meeting.
+services:
+  - type: web
+    name: business-bot
+    runtime: python
+    plan: starter            # free plan sleeps after 15 min idle → first WhatsApp reply can take ~1 minute
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --threads 8 --timeout 60 --bind 0.0.0.0:$PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: META_VERIFY_TOKEN
+        generateValue: true
+      - key: TELEGRAM_WEBHOOK_SECRET
+        generateValue: true
+      - key: BOT_MODE
+        value: basic
+      - key: BUSINESS_NAME
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: WHATSAPP_PHONE_ID
+        sync: false
+      - key: FACEBOOK_ACCESS_TOKEN
+        sync: false
+      - key: PAGE_ACCESS_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OWNER_TELEGRAM_CHAT_ID
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
